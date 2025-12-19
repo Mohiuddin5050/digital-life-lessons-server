@@ -30,7 +30,27 @@ async function run() {
     const userCollection = db.collection("users");
 
     // user api
-    app.get("/users", async (req, res) => {});
+    app.get("/users", async (req, res) => {
+      const email = req.query.email;
+      const query = {};
+
+      if (email) {
+        query.email = email;
+      }
+
+      const result = await userCollection.find(query).toArray();
+      res.send(result);
+    });
+
+    app.get("/users/:email/status", async (req, res) => {
+      const email = req.params.email;
+      const user = await userCollection.findOne({ email });
+
+      res.send({
+        isPremium: user?.isPremium || false,
+        role: user?.role || "user",
+      });
+    });
 
     app.post("/users", async (req, res) => {
       const user = req.body;
