@@ -28,6 +28,7 @@ async function run() {
 
     const db = client.db("digital_life_lessons");
     const userCollection = db.collection("users");
+    const lessonsCollection = db.collection("lessons");
 
     // user api
     app.get("/users", async (req, res) => {
@@ -67,6 +68,31 @@ async function run() {
       }
 
       const result = await userCollection.insertOne(user);
+      res.send(result);
+    });
+
+    // Get Public Lessons
+
+    app.get("/lessons", async (req, res) => {
+      try {
+        const lessons = await lessonsCollection
+          .find({}) // both public & premium
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(lessons);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch lessons" });
+      }
+    });
+
+    app.post("/lessons", async (req, res) => {
+      const lesson = req.body;
+
+      // lesson created time
+      lesson.createdAt = new Date();
+
+      const result = await lessonsCollection.insertOne(lesson);
       res.send(result);
     });
 
