@@ -76,16 +76,73 @@ async function run() {
 
     // Get Public Lessons
 
+    // app.get("/lessons", async (req, res) => {
+    //   try {
+    //     const result = await lessonsCollection
+    //       .find({})
+    //       .sort({ createdAt: -1 })
+    //       .toArray();
+
+    //     res.send(result);
+    //   } catch (error) {
+    //     res.status(500).send({ message: "Failed to fetch result" });
+    //   }
+    // });
+
+    // In your backend routes (index.js)
     app.get("/lessons", async (req, res) => {
       try {
+        const { category, emotionalTone, privacy, featured, limit } = req.query;
+        const query = {};
+
+        if (!req.user) {
+          query.privacy = "public";
+        }
+
+        if (category && category !== "all") {
+          query.category = category;
+        }
+
+        if (emotionalTone && emotionalTone !== "all") {
+          query.emotionalTone = emotionalTone;
+        }
+
+        if (privacy && privacy !== "all") {
+          query.privacy = privacy;
+        }
+
+        if (featured === "true") {
+          query.isFeatured = true;
+        }
+
         const lessons = await lessonsCollection
-          .find({}) // both public & premium
+          .find(query)
           .sort({ createdAt: -1 })
+          .limit(Number(limit) || 50)
           .toArray();
 
         res.send(lessons);
       } catch (error) {
         res.status(500).send({ message: "Failed to fetch lessons" });
+      }
+    });
+
+    // Add this route for featured lessons specifically
+    app.get("/lessons/featured", async (req, res) => {
+      try {
+        const featuredLessons = await lessonsCollection
+          .find({
+            privacy: "public",
+            isFeatured: true,
+            accessLevel: "free",
+          })
+          .sort({ createdAt: -1 })
+          .limit(6)
+          .toArray();
+
+        res.send(featuredLessons);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch featured lessons" });
       }
     });
 
@@ -101,7 +158,7 @@ async function run() {
       res.send(result);
     });
 
-    // ===== Get lesson by ID (with recommended lessons) =====
+    // Get lesson by ID (with recommended lessons)
     app.get("/lessons/:id", async (req, res) => {
       const id = req.params.id;
 
@@ -154,7 +211,7 @@ async function run() {
 
         await lessonsCollection.updateOne(
           { _id: new ObjectId(lessonId) },
-          update
+          update,
         );
 
         res.send({ liked: !alreadyLiked });
@@ -181,7 +238,7 @@ async function run() {
         });
         await lessonsCollection.updateOne(
           { _id: new ObjectId(lessonId) },
-          { $inc: { favoritesCount: 1 } }
+          { $inc: { favoritesCount: 1 } },
         );
 
         res.send({ success: true });
@@ -202,7 +259,7 @@ async function run() {
         if (result.deletedCount === 1) {
           await lessonsCollection.updateOne(
             { _id: new ObjectId(lessonId) },
-            { $inc: { favoritesCount: -1 } }
+            { $inc: { favoritesCount: -1 } },
           );
         }
 
@@ -275,7 +332,7 @@ async function run() {
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
+      "Pinged your deployment. You successfully connected to MongoDB!",
     );
   } finally {
     // Ensures that the client will close when you finish/error
