@@ -335,7 +335,6 @@ async function run() {
       const session = await stripe.checkout.sessions.create({
         line_items: [
           {
-            // Provide the exact Price ID (for example, price_1234) of the product you want to sell
             price_data: {
               currency: "bdt",
               unit_amount: 150000,
@@ -353,11 +352,44 @@ async function run() {
           userId: paymentInfo._id,
           email: paymentInfo.email,
         },
-        success_url: `${process.env.SITE_DOMAIN}/payment-success`,
+        success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${process.env.SITE_DOMAIN}/payment-canceled`,
       });
       console.log(session);
       res.send({ url: session.url });
+    });
+
+
+     app.patch("/payment-success", async (req, res) => {
+      const sessionId = req.query.session_id;
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+      //Check payment exits or not
+      const transactionId = session.payment_intent;
+      const query = { transactionId: transactionId };
+
+      const paymentExist = await userCollection.findOne(query);
+      if (paymentExist) {
+        return res.send({
+          message: "Already Exists",
+          transactionId,
+        });
+      }
+
+      if (session.payment_status === "paid") {
+        const userId = session.metadata.userId;
+        const query = { _id: new ObjectId(userId) };
+
+        const update = {
+          $set: {
+            isPremium: true,
+            transactionId: session.payment_intent,
+          },
+        };
+        const result = await userCollection.updateOne(query, update);
+        res.send(result);
+      }
+      res.send({ success: true });
     });
 
     // Send a ping to confirm a successful connection
