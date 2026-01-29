@@ -77,20 +77,6 @@ async function run() {
 
     // Get Public Lessons
 
-    // app.get("/lessons", async (req, res) => {
-    //   try {
-    //     const result = await lessonsCollection
-    //       .find({})
-    //       .sort({ createdAt: -1 })
-    //       .toArray();
-
-    //     res.send(result);
-    //   } catch (error) {
-    //     res.status(500).send({ message: "Failed to fetch result" });
-    //   }
-    // });
-
-    // In your backend routes (index.js)
     app.get("/lessons", async (req, res) => {
       try {
         const { category, emotionalTone, privacy, featured, limit } = req.query;
@@ -330,37 +316,136 @@ async function run() {
       }
     });
 
-    app.post("/create-checkout-session", async (req, res) => {
-      const paymentInfo = req.body;
-      const session = await stripe.checkout.sessions.create({
-        line_items: [
-          {
-            price_data: {
-              currency: "bdt",
-              unit_amount: 150000,
-              product_data: {
-                name: "Premium Membership",
-                description: "Access all premium life lessons",
+    // ===== Get Top Contributors =====
+    app.get("/users/top-contributors", async (req, res) => {
+      try {
+        const oneWeekAgo = new Date();
+        oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+
+        const contributors = await userCollection
+          .aggregate([
+            {
+              $lookup: {
+                from: "lessons",
+                localField: "email",
+                foreignField: "createdBy",
+                as: "lessons",
               },
             },
-            quantity: 1,
-          },
-        ],
-        customer_email: paymentInfo.email,
-        mode: "payment",
-        metadata: {
-          userId: paymentInfo._id,
-          email: paymentInfo.email,
-        },
-        success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${process.env.SITE_DOMAIN}/payment-canceled`,
-      });
-      console.log(session);
-      res.send({ url: session.url });
+            {
+              $addFields: {
+                lessons: {
+                  $filter: {
+                    input: "$lessons",
+                    as: "lesson",
+                    cond: {
+                      $and: [
+                        { $eq: ["$$lesson.privacy", "public"] },
+                        // { $gte: ["$$lesson.createdAt", oneWeekAgo] },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+            {
+              $addFields: {
+                totalLessons: { $size: "$lessons" },
+              },
+            },
+            {
+              $match: {
+                totalLessons: { $gt: 0 },
+              },
+            },
+            {
+              $sort: { totalLessons: -1 },
+            },
+            {
+              $limit: 3,
+            },
+            {
+              $project: {
+                _id: 1,
+                name: "$displayName",
+                email: 1,
+                photoURL: "$photoUrl",
+                totalLessons: 1,
+              },
+            },
+          ])
+          .toArray();
+
+        res.send(contributors);
+      } catch (error) {
+        console.error("Top contributors error:", error);
+        res.status(500).send({ message: "Failed to load contributors" });
+      }
     });
 
+    // GET /api/top-contributors
+    app.get("/top-contributors", async (req, res) => {
+      try {
+        const lastWeek = new Date();
+        lastWeek.setDate(lastWeek.getDate() - 7);
 
-     app.patch("/payment-success", async (req, res) => {
+        const contributors = await lessonsCollection
+          .aggregate([
+            {
+              // 1. Filter: Lessons created in the last 7 days
+              $match: {
+                createdAt: { $gte: lastWeek },
+              },
+            },
+            {
+              // 2. Group by userEmail (or userId) and count lessons
+              $group: {
+                _id: "$userEmail", // or "$userId"
+                lessonCount: { $sum: 1 },
+              },
+            },
+            {
+              // 3. Sort by highest count first
+              $sort: { lessonCount: -1 },
+            },
+            {
+              // 4. Limit to top 5 or 10
+              $limit: 6,
+            },
+            {
+              // 5. Join with Users collection to get Profile Info
+              $lookup: {
+                from: "users", // the name of your users collection
+                localField: "_id",
+                foreignField: "email", // or "userId"
+                as: "authorDetails",
+              },
+            },
+            {
+              // 6. Flatten the authorDetails array
+              $unwind: "$authorDetails",
+            },
+            {
+              // 7. Project only the fields needed for the UI
+              $project: {
+                _id: 0,
+                email: "$_id",
+                lessonCount: 1,
+                name: "$authorDetails.displayName",
+                photoUrl: "$authorDetails.photoUrl",
+              },
+            },
+          ])
+          .toArray();
+
+        res.send(contributors);
+      } catch (error) {
+        console.error("Error fetching top contributors:", error);
+        res.status(500).send({ message: "Internal Server Error" });
+      }
+    });
+
+    app.patch("/payment-success", async (req, res) => {
       const sessionId = req.query.session_id;
       const session = await stripe.checkout.sessions.retrieve(sessionId);
 
