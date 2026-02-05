@@ -75,6 +75,28 @@ async function run() {
       res.send(result);
     });
 
+    app.get("/users/creator/:email", async (req, res) => {
+      const email = req.params.email;
+
+      try {
+        const user = await userCollection.findOne({ email });
+        if (!user) return res.status(404).send({});
+
+        const totalLessons = await lessonsCollection.countDocuments({
+          createdBy: email,
+        });
+
+        res.send({
+          displayName: user.displayName,
+          photoUrl: user.photoUrl,
+          email: user.email,
+          totalLessons,
+        });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to load creator" });
+      }
+    });
+
     // Get Public Lessons
 
     app.get("/lessons", async (req, res) => {
@@ -153,18 +175,39 @@ async function run() {
         const lesson = await lessonsCollection.findOne({
           _id: new ObjectId(id),
         });
-        if (!lesson)
-          return res.status(404).send({ message: "Lesson not found" });
 
-        // Fetch recommended lessons (same category or emotionalTone)
+        if (!lesson) {
+          return res.status(404).send({ message: "Lesson not found" });
+        }
+
+        // 👉 Fetch author info
+        const author = await userCollection.findOne({
+          email: lesson.createdBy,
+        });
+
+        // 👉 Count total lessons by this author
+        const totalLessons = await lessonsCollection.countDocuments({
+          createdBy: lesson.createdBy,
+          privacy: "public",
+        });
+
+        // 👉 Attach author object
+        lesson.author = {
+          displayName: author?.displayName || "Anonymous",
+          photoUrl: author?.photoUrl || null,
+          email: author?.email,
+          totalLessons,
+        };
+
+        // 👉 Recommended lessons
         const recommended = await lessonsCollection
           .find({
             _id: { $ne: lesson._id },
+            privacy: "public",
             $or: [
               { category: lesson.category },
               { emotionalTone: lesson.emotionalTone },
             ],
-            accessLevel: "public", // show only public lessons
           })
           .limit(6)
           .toArray();
@@ -172,147 +215,169 @@ async function run() {
         lesson.recommended = recommended;
 
         res.send(lesson);
-      } catch (err) {
-        console.error(err);
+      } catch (error) {
+        console.error("Lesson details error:", error);
         res.status(500).send({ message: "Failed to fetch lesson" });
       }
     });
 
     // ===== Toggle Like =====
+    // app.patch("/lessons/:id/like", async (req, res) => {
+    //   const lessonId = req.params.id;
+    //   const { userId } = req.body;
+
+    //   try {
+    //     const lesson = await lessonsCollection.findOne({
+    //       _id: new ObjectId(lessonId),
+    //     });
+    //     if (!lesson)
+    //       return res.status(404).send({ message: "Lesson not found" });
+
+    //     const alreadyLiked = lesson.likes?.includes(userId);
+
+    //     const update = alreadyLiked
+    //       ? { $pull: { likes: userId }, $inc: { likesCount: -1 } }
+    //       : { $addToSet: { likes: userId }, $inc: { likesCount: 1 } };
+
+    //     await lessonsCollection.updateOne(
+    //       { _id: new ObjectId(lessonId) },
+    //       update,
+    //     );
+
+    //     res.send({ liked: !alreadyLiked });
+    //   } catch (err) {
+    //     res.status(500).send({ message: "Failed to update like" });
+    //   }
+    // });
+
+    // app.patch("/lessons/:id/like", async (req, res) => {
+    //   const { userId } = req.body;
+    //   const lessonId = req.params.id;
+
+    //   const lesson = await lessonsCollection.findOne({
+    //     _id: new ObjectId(lessonId),
+    //   });
+
+    //   const alreadyLiked = lesson.likes.includes(userId);
+
+    //   const update = alreadyLiked
+    //     ? {
+    //         $pull: { likes: userId },
+    //         $inc: { likesCount: -1 },
+    //       }
+    //     : {
+    //         $addToSet: { likes: userId },
+    //         $inc: { likesCount: 1 },
+    //       };
+
+    //   await lessonsCollection.updateOne(
+    //     { _id: new ObjectId(lessonId) },
+    //     update,
+    //   );
+
+    //   res.send({ success: true });
+    // });
+
     app.patch("/lessons/:id/like", async (req, res) => {
+      const { email } = req.body;
       const lessonId = req.params.id;
-      const { userId } = req.body;
 
-      try {
-        const lesson = await lessonsCollection.findOne({
-          _id: new ObjectId(lessonId),
-        });
-        if (!lesson)
-          return res.status(404).send({ message: "Lesson not found" });
+      const lesson = await lessonsCollection.findOne({
+        _id: new ObjectId(lessonId),
+      });
 
-        const alreadyLiked = lesson.likes?.includes(userId);
-
-        const update = alreadyLiked
-          ? { $pull: { likes: userId }, $inc: { likesCount: -1 } }
-          : { $addToSet: { likes: userId }, $inc: { likesCount: 1 } };
-
-        await lessonsCollection.updateOne(
-          { _id: new ObjectId(lessonId) },
-          update,
-        );
-
-        res.send({ liked: !alreadyLiked });
-      } catch (err) {
-        res.status(500).send({ message: "Failed to update like" });
+      if (!lesson) {
+        return res.status(404).send({ message: "Lesson not found" });
       }
+
+      const alreadyLiked = lesson.likes.includes(email);
+
+      const update = alreadyLiked
+        ? {
+            $pull: { likes: email },
+            $inc: { likesCount: -1 },
+          }
+        : {
+            $addToSet: { likes: email },
+            $inc: { likesCount: 1 },
+          };
+
+      await lessonsCollection.updateOne(
+        { _id: new ObjectId(lessonId) },
+        update,
+      );
+
+      res.send({ liked: !alreadyLiked });
     });
 
-    // ===== Add to Favorites =====
-    app.post("/favorites", async (req, res) => {
-      const { lessonId, userEmail } = req.body;
+    app.post("/favorites/toggle", async (req, res) => {
+      const { lessonId, email } = req.body;
 
-      try {
-        const exists = await favoritesCollection.findOne({
-          lessonId,
-          userEmail,
-        });
-        if (exists) return res.send({ message: "Already favorited" });
+      const exists = await favoritesCollection.findOne({ lessonId, email });
 
-        await favoritesCollection.insertOne({
-          lessonId,
-          userEmail,
-          createdAt: new Date(),
-        });
+      if (exists) {
+        await favoritesCollection.deleteOne({ lessonId, email });
         await lessonsCollection.updateOne(
           { _id: new ObjectId(lessonId) },
-          { $inc: { favoritesCount: 1 } },
+          { $inc: { favoritesCount: -1 } },
         );
-
-        res.send({ success: true });
-      } catch (err) {
-        res.status(500).send({ message: "Failed to add favorite" });
+        return res.send({ favorited: false });
       }
+
+      await favoritesCollection.insertOne({
+        lessonId,
+        email,
+        createdAt: new Date(),
+      });
+
+      await lessonsCollection.updateOne(
+        { _id: new ObjectId(lessonId) },
+        { $inc: { favoritesCount: 1 } },
+      );
+
+      res.send({ favorited: true });
     });
 
-    // ===== Remove from Favorites =====
-    app.delete("/favorites", async (req, res) => {
-      const { lessonId, userEmail } = req.body;
-
+    app.post("/reports", async (req, res) => {
       try {
-        const result = await favoritesCollection.deleteOne({
-          lessonId,
-          userEmail,
-        });
-        if (result.deletedCount === 1) {
-          await lessonsCollection.updateOne(
-            { _id: new ObjectId(lessonId) },
-            { $inc: { favoritesCount: -1 } },
-          );
+        const { lessonId, reporterEmail, reason } = req.body;
+
+        // basic validation
+        if (!lessonId || !reporterEmail || !reason) {
+          return res.status(400).send({
+            success: false,
+            message: "Missing required fields",
+          });
         }
 
-        res.send(result);
-      } catch (err) {
-        res.status(500).send({ message: "Failed to remove favorite" });
-      }
-    });
-
-    // ===== Report Lesson =====
-    app.post("/reports", async (req, res) => {
-      const { lessonId, reporterEmail, reason } = req.body;
-
-      try {
-        const existing = await reportsCollection.findOne({
+        const existingReport = await reportsCollection.findOne({
           lessonId,
           reporterEmail,
         });
-        if (existing)
-          return res.status(400).send({ message: "Already reported" });
 
-        await reportsCollection.insertOne({
+        if (existingReport) {
+          return res.status(400).send({
+            success: false,
+            message: "You already reported this lesson.",
+          });
+        }
+
+        const report = {
           lessonId,
           reporterEmail,
           reason,
           createdAt: new Date(),
-        });
-        res.send({ success: true });
-      } catch (err) {
-        res.status(500).send({ message: "Failed to report lesson" });
-      }
-    });
-
-    // ===== Get Comments =====
-    app.get("/comments", async (req, res) => {
-      const { lessonId } = req.query;
-
-      try {
-        const query = lessonId ? { lessonId } : {};
-        const comments = await commentsCollection
-          .find(query)
-          .sort({ createdAt: -1 })
-          .toArray();
-        res.send(comments);
-      } catch (err) {
-        res.status(500).send({ message: "Failed to fetch comments" });
-      }
-    });
-
-    // ===== Post Comment =====
-    app.post("/comments", async (req, res) => {
-      const { lessonId, commenterEmail, commenterName, comment } = req.body;
-
-      try {
-        const newComment = {
-          lessonId,
-          commenterEmail,
-          commenterName,
-          comment,
-          createdAt: new Date(),
         };
 
-        await commentsCollection.insertOne(newComment);
+        await reportsCollection.insertOne(report);
+
         res.send({ success: true });
-      } catch (err) {
-        res.status(500).send({ message: "Failed to post comment" });
+      } catch (error) {
+        console.error("REPORT ERROR:", error);
+        res.status(500).send({
+          success: false,
+          message: "Failed to report lesson",
+        });
       }
     });
 
@@ -383,65 +448,72 @@ async function run() {
       }
     });
 
-    // GET /api/top-contributors
-    app.get("/top-contributors", async (req, res) => {
+    app.post("/comments", async (req, res) => {
       try {
-        const lastWeek = new Date();
-        lastWeek.setDate(lastWeek.getDate() - 7);
+        const { lessonId, userEmail, userName, userPhoto, comment } = req.body;
 
-        const contributors = await lessonsCollection
-          .aggregate([
-            {
-              // 1. Filter: Lessons created in the last 7 days
-              $match: {
-                createdAt: { $gte: lastWeek },
-              },
-            },
-            {
-              // 2. Group by userEmail (or userId) and count lessons
-              $group: {
-                _id: "$userEmail", // or "$userId"
-                lessonCount: { $sum: 1 },
-              },
-            },
-            {
-              // 3. Sort by highest count first
-              $sort: { lessonCount: -1 },
-            },
-            {
-              // 4. Limit to top 5 or 10
-              $limit: 6,
-            },
-            {
-              // 5. Join with Users collection to get Profile Info
-              $lookup: {
-                from: "users", // the name of your users collection
-                localField: "_id",
-                foreignField: "email", // or "userId"
-                as: "authorDetails",
-              },
-            },
-            {
-              // 6. Flatten the authorDetails array
-              $unwind: "$authorDetails",
-            },
-            {
-              // 7. Project only the fields needed for the UI
-              $project: {
-                _id: 0,
-                email: "$_id",
-                lessonCount: 1,
-                name: "$authorDetails.displayName",
-                photoUrl: "$authorDetails.photoUrl",
-              },
-            },
-          ])
+        if (!lessonId || !userEmail || !comment) {
+          return res.status(400).send({ message: "Missing data" });
+        }
+
+        const newComment = {
+          lessonId,
+          userEmail,
+          userName,
+          userPhoto,
+          comment,
+          createdAt: new Date(),
+        };
+
+        await commentsCollection.insertOne(newComment);
+        res.send({ success: true });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to add comment" });
+      }
+    });
+
+    app.get("/comments/:lessonId", async (req, res) => {
+      try {
+        const comments = await commentsCollection
+          .find({ lessonId: req.params.lessonId })
+          .sort({ createdAt: -1 })
           .toArray();
 
-        res.send(contributors);
+        res.send(comments);
       } catch (error) {
-        console.error("Error fetching top contributors:", error);
-        res.status(500).send({ message: "Internal Server Error" });
+        res.status(500).send({ message: "Failed to load comments" });
+      }
+    });
+
+    // Similar / Recommended lessons
+    app.get("/lessons/:id/recommended", async (req, res) => {
+      const id = req.params.id;
+
+      try {
+        const lesson = await lessonsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!lesson) {
+          return res.status(404).send({ message: "Lesson not found" });
+        }
+
+        const recommended = await lessonsCollection
+          .find({
+            _id: { $ne: lesson._id },
+            privacy: "public",
+            $or: [
+              { category: lesson.category },
+              { emotionalTone: lesson.emotionalTone },
+            ],
+          })
+          .limit(6)
+          .toArray();
+
+        res.send(recommended);
+      } catch (error) {
+        console.error("Recommended lessons error:", error);
+        res.status(500).send({ message: "Failed to load recommended lessons" });
       }
     });
 
