@@ -167,6 +167,95 @@ async function run() {
       res.send(result);
     });
 
+    app.get("/lessons/most-saved", async (req, res) => {
+      try {
+        const lessons = await lessonsCollection
+          .find({ privacy: "public" })
+          .sort({ favoritesCount: -1 })
+          .limit(3)
+          .toArray();
+
+        res.send(lessons);
+      } catch (error) {
+        console.error("❌ Most saved lessons error:", error);
+        res.status(500).send({ message: "Failed to load most saved lessons" });
+      }
+    });
+
+    app.get("/dashboard/summary", async (req, res) => {
+      try {
+        const { email } = req.query;
+
+        if (!email) {
+          return res.status(400).send({ message: "Email required" });
+        }
+
+        // Total lessons created
+        const totalLessons = await lessonsCollection.countDocuments({
+          createdBy: email,
+        });
+
+        // Total favorites saved by user
+        const totalFavorites = await favoritesCollection.countDocuments({
+          email: email,
+        });
+
+        // Recent lessons (last 3)
+        const recentLessons = await lessonsCollection
+          .find({ createdBy: email })
+          .sort({ createdAt: -1 })
+          .limit(3)
+          .toArray();
+
+        // Weekly analytics (last 7 days)
+        // const sevenDaysAgo = new Date();
+        // sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+        const weeklyLessons = await lessonsCollection.countDocuments({
+          createdBy: email,
+          // createdAt: { $gte: sevenDaysAgo },
+        });
+
+        res.send({
+          totalLessons,
+          totalFavorites,
+          recentLessons,
+          analytics: {
+            weeklyLessons,
+          },
+        });
+      } catch (error) {
+        console.error("Dashboard summary error:", error);
+        res.status(500).send({ message: "Failed to load dashboard" });
+      }
+    });
+
+    app.get("/dashboard/analytics/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+
+        const data = await lessonsCollection
+          .aggregate([
+            { $match: { createdBy: email } },
+            {
+              $group: {
+                _id: {
+                  week: { $week: "$createdAt" },
+                },
+                count: { $sum: 1 },
+              },
+            },
+            { $sort: { "_id.week": 1 } },
+          ])
+          .toArray();
+
+        res.send(data);
+      } catch (error) {
+        console.error("Analytics error:", error);
+        res.status(500).send({ message: "Analytics failed" });
+      }
+    });
+
     // Get lesson by ID (with recommended lessons)
     app.get("/lessons/:id", async (req, res) => {
       const id = req.params.id;
@@ -220,63 +309,6 @@ async function run() {
         res.status(500).send({ message: "Failed to fetch lesson" });
       }
     });
-
-    // ===== Toggle Like =====
-    // app.patch("/lessons/:id/like", async (req, res) => {
-    //   const lessonId = req.params.id;
-    //   const { userId } = req.body;
-
-    //   try {
-    //     const lesson = await lessonsCollection.findOne({
-    //       _id: new ObjectId(lessonId),
-    //     });
-    //     if (!lesson)
-    //       return res.status(404).send({ message: "Lesson not found" });
-
-    //     const alreadyLiked = lesson.likes?.includes(userId);
-
-    //     const update = alreadyLiked
-    //       ? { $pull: { likes: userId }, $inc: { likesCount: -1 } }
-    //       : { $addToSet: { likes: userId }, $inc: { likesCount: 1 } };
-
-    //     await lessonsCollection.updateOne(
-    //       { _id: new ObjectId(lessonId) },
-    //       update,
-    //     );
-
-    //     res.send({ liked: !alreadyLiked });
-    //   } catch (err) {
-    //     res.status(500).send({ message: "Failed to update like" });
-    //   }
-    // });
-
-    // app.patch("/lessons/:id/like", async (req, res) => {
-    //   const { userId } = req.body;
-    //   const lessonId = req.params.id;
-
-    //   const lesson = await lessonsCollection.findOne({
-    //     _id: new ObjectId(lessonId),
-    //   });
-
-    //   const alreadyLiked = lesson.likes.includes(userId);
-
-    //   const update = alreadyLiked
-    //     ? {
-    //         $pull: { likes: userId },
-    //         $inc: { likesCount: -1 },
-    //       }
-    //     : {
-    //         $addToSet: { likes: userId },
-    //         $inc: { likesCount: 1 },
-    //       };
-
-    //   await lessonsCollection.updateOne(
-    //     { _id: new ObjectId(lessonId) },
-    //     update,
-    //   );
-
-    //   res.send({ success: true });
-    // });
 
     app.patch("/lessons/:id/like", async (req, res) => {
       const { email } = req.body;
