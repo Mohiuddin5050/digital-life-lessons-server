@@ -255,6 +255,29 @@ async function run() {
         res.status(500).send({ message: "Analytics failed" });
       }
     });
+    // GET /lessons/my?email=user@email.com
+    app.get("/lessons/my", async (req, res) => {
+      try {
+        const email = req.query.email;
+
+        console.log("MY LESSONS EMAIL:", email);
+
+        if (!email) {
+          return res.status(400).send({ message: "Email query missing" });
+        }
+
+        const lessons = await lessonsCollection
+          .find({
+            createdBy: email,
+          })
+          .toArray();
+
+        res.send(lessons);
+      } catch (error) {
+        console.error("LESSONS/MY ERROR:", error);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
 
     // Get lesson by ID (with recommended lessons)
     app.get("/lessons/:id", async (req, res) => {
@@ -307,6 +330,52 @@ async function run() {
       } catch (error) {
         console.error("Lesson details error:", error);
         res.status(500).send({ message: "Failed to fetch lesson" });
+      }
+    });
+
+    // GET lesson by ID (for update)
+    app.get("/lessons/edit/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        const lesson = await lessonsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!lesson) {
+          return res.status(404).send({ message: "Lesson not found" });
+        }
+
+        res.send(lesson);
+      } catch (error) {
+        console.error("GET EDIT LESSON ERROR:", error);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
+
+    // UPDATE lesson
+    app.patch("/lessons/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const updatedData = req.body;
+
+        delete updatedData.createdBy; // security
+        delete updatedData.createdAt;
+
+        const result = await lessonsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              ...updatedData,
+              updatedAt: new Date(),
+            },
+          },
+        );
+
+        res.send(result);
+      } catch (error) {
+        console.error("UPDATE LESSON ERROR:", error);
+        res.status(500).send({ message: "Failed to update lesson" });
       }
     });
 
@@ -410,6 +479,124 @@ async function run() {
           success: false,
           message: "Failed to report lesson",
         });
+      }
+    });
+    // ======= My lessons =========
+
+    // PATCH /lessons/:id
+    app.patch("/lessons/:id", async (req, res) => {
+      const id = req.params.id;
+      const updatedData = req.body;
+
+      const result = await lessonsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: updatedData },
+      );
+
+      res.send(result);
+    });
+
+    // PATCH /lessons/:id/visibility
+    app.patch("/lessons/:id/visibility", async (req, res) => {
+      const { id } = req.params;
+      const { privacy } = req.body;
+
+      await lessonsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { privacy } },
+      );
+
+      res.send({ success: true });
+    });
+
+    // PATCH /lessons/:id/access
+    app.patch("/lessons/:id/access", async (req, res) => {
+      const { id } = req.params;
+      const { accessLevel } = req.body;
+
+      await lessonsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { accessLevel } },
+      );
+
+      res.send({ success: true });
+    });
+
+    // DELETE /lessons/:id
+    app.delete("/lessons/:id", async (req, res) => {
+      const id = req.params.id;
+
+      await lessonsCollection.deleteOne({ _id: new ObjectId(id) });
+
+      res.send({ success: true });
+    });
+
+    // ===============
+
+    // GET /favorites/my?email=user@email.com
+    app.get("/favorites/my", async (req, res) => {
+      try {
+        const email = req.query.email;
+        if (!email) {
+          return res.status(400).send({ message: "Email required" });
+        }
+
+        const favorites = await favoritesCollection.find({ email }).toArray();
+
+        if (favorites.length === 0) {
+          return res.send([]);
+        }
+
+        const lessonIds = favorites.map((fav) => new ObjectId(fav.lessonId));
+
+        const lessons = await lessonsCollection
+          .find({ _id: { $in: lessonIds } })
+          .toArray();
+
+        const result = lessons.map((lesson) => {
+          const fav = favorites.find(
+            (f) => f.lessonId === lesson._id.toString(),
+          );
+
+          return {
+            _id: lesson._id,
+            lessonTitle: lesson.lessonTitle,
+            category: lesson.category,
+            emotionalTone: lesson.emotionalTone,
+            likesCount: lesson.likesCount || 0,
+            favoritesCount: lesson.favoritesCount || 0,
+            createdAt: fav?.createdAt,
+          };
+        });
+
+        res.send(result);
+      } catch (error) {
+        console.error("MY FAVORITES ERROR:", error);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
+
+    // DELETE /favorites/:lessonId
+    app.delete("/favorites/remove", async (req, res) => {
+      try {
+        const { lessonId, email } = req.query;
+
+        if (!lessonId || !email) {
+          return res.status(400).send({ message: "Missing data" });
+        }
+
+        const result = await favoritesCollection.deleteOne({
+          lessonId,
+          email,
+        });
+
+        res.send({
+          success: true,
+          deletedCount: result.deletedCount,
+        });
+      } catch (error) {
+        console.error("REMOVE FAVORITE ERROR:", error);
+        res.status(500).send({ message: "Server error" });
       }
     });
 
@@ -547,6 +734,39 @@ async function run() {
         console.error("Recommended lessons error:", error);
         res.status(500).send({ message: "Failed to load recommended lessons" });
       }
+    });
+
+    // ===== ===== Payments Related Api ===== =====//
+
+    app.post("/create-checkout-session", async (req, res) => {
+      const userInfo = req.body;
+
+      const session = await stripe.checkout.sessions.create({
+        line_items: [
+          {
+            price_data: {
+              currency: "bdt",
+              product_data: {
+                name: "Premium Membership",
+                description: "Unlock premium lessons",
+              },
+              unit_amount: 150000, // 1500 taka
+            },
+            quantity: 1,
+          },
+        ],
+        customer_email: userInfo.email,
+        mode: "payment",
+        metadata: {
+          userId: userInfo._id,
+          email: userInfo.email,
+        },
+
+        success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.SITE_DOMAIN}/payment-cancel`,
+      });
+
+      res.send({ url: session.url });
     });
 
     app.patch("/payment-success", async (req, res) => {
