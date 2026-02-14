@@ -75,6 +75,24 @@ async function run() {
       res.send(result);
     });
 
+    app.patch("/users", async (req, res) => {
+      const email = req.query.email;
+
+      const { displayName, photoUrl } = req.body;
+
+      const query = { email };
+
+      const updatedDoc = {
+        $set: {
+          displayName,
+          photoUrl,
+        },
+      };
+
+      const result = await userCollection.updateOne(query, updatedDoc);
+      res.send(result);
+    });
+
     app.get("/users/creator/:email", async (req, res) => {
       const email = req.params.email;
 
@@ -734,6 +752,305 @@ async function run() {
         console.error("Recommended lessons error:", error);
         res.status(500).send({ message: "Failed to load recommended lessons" });
       }
+    });
+
+    // ======= Admin Related APIs ======= //
+    app.get("/admin/overview", async (req, res) => {
+      try {
+        const totalUsers = await userCollection.countDocuments();
+
+        const totalPublicLessons = await lessonsCollection.countDocuments({
+          privacy: "public",
+        });
+
+        const totalReportedLessons = await reportsCollection.countDocuments();
+
+        // Today's lessons
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const todaysLessons = await lessonsCollection.countDocuments({
+          createdAt: { $gte: today },
+        });
+
+        res.send({
+          totalUsers,
+          totalPublicLessons,
+          totalReportedLessons,
+          todaysLessons,
+        });
+      } catch (err) {
+        res.status(500).send({ message: "Admin overview failed" });
+      }
+    });
+
+    app.get("/admin/analytics", async (req, res) => {
+      try {
+        // ===== USERS GROWTH =====
+        const usersGrowth = await userCollection
+          .aggregate([
+            {
+              $group: {
+                _id: {
+                  $dateToString: {
+                    format: "%Y-%m-%d",
+                    date: "$createdAt",
+                  },
+                },
+                users: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+          ])
+          .toArray();
+
+        // ===== LESSONS GROWTH =====
+        const lessonsGrowth = await lessonsCollection
+          .aggregate([
+            {
+              $group: {
+                _id: {
+                  $dateToString: {
+                    format: "%Y-%m-%d",
+                    date: "$createdAt",
+                  },
+                },
+                lessons: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+          ])
+          .toArray();
+
+        // ===== MERGE BOTH DATA =====
+        const growthMap = {};
+
+        usersGrowth.forEach((item) => {
+          growthMap[item._id] = {
+            date: item._id,
+            users: item.users,
+            lessons: 0,
+          };
+        });
+
+        lessonsGrowth.forEach((item) => {
+          if (!growthMap[item._id]) {
+            growthMap[item._id] = {
+              date: item._id,
+              users: 0,
+              lessons: item.lessons,
+            };
+          } else {
+            growthMap[item._id].lessons = item.lessons;
+          }
+        });
+
+        const result = Object.values(growthMap).sort(
+          (a, b) => new Date(a.date) - new Date(b.date),
+        );
+
+        res.send(result);
+      } catch (error) {
+        console.error("Admin growth analytics error:", error);
+        res.status(500).send({ message: "Failed to load growth analytics" });
+      }
+    });
+
+    // GET /admin/users
+    app.get("/admin/users", async (req, res) => {
+      try {
+        const users = await userCollection
+          .aggregate([
+            {
+              $lookup: {
+                from: "lessons",
+                localField: "email",
+                foreignField: "createdBy",
+                as: "lessons",
+              },
+            },
+            {
+              $addFields: {
+                totalLessons: { $size: "$lessons" },
+              },
+            },
+            {
+              $project: {
+                displayName: 1,
+                email: 1,
+                role: 1,
+                isPremium: 1,
+                totalLessons: 1,
+              },
+            },
+          ])
+          .toArray();
+
+        res.send(users);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to load users" });
+      }
+    });
+
+    // PATCH /admin/users/role
+    app.patch("/admin/users/role", async (req, res) => {
+      const { email, role } = req.body;
+
+      const result = await userCollection.updateOne(
+        { email },
+        { $set: { role } },
+      );
+
+      res.send(result);
+    });
+
+    // DELETE /admin/users/:email
+    app.delete("/admin/users/:email", async (req, res) => {
+      const email = req.params.email;
+
+      await userCollection.deleteOne({ email });
+      await lessonsCollection.deleteMany({ createdBy: email });
+
+      res.send({ success: true });
+    });
+
+    // GET /admin/lessons
+    app.get("/admin/lessons", async (req, res) => {
+      const { category, privacy, flagged } = req.query;
+
+      const query = {};
+      if (category) query.category = category;
+      if (privacy) query.privacy = privacy;
+
+      const lessons = await lessonsCollection.find(query).toArray();
+
+      const lessonIds = lessons.map((l) => l._id.toString());
+
+      const reports = await reportsCollection
+        .find({ lessonId: { $in: lessonIds } })
+        .toArray();
+
+      const lessonsWithMeta = lessons.map((lesson) => {
+        const lessonReports = reports.filter(
+          (r) => r.lessonId === lesson._id.toString(),
+        );
+
+        return {
+          ...lesson,
+          reportsCount: lessonReports.length,
+          reviewed: lessonReports.length === 0,
+        };
+      });
+
+      const filtered =
+        flagged === "flagged"
+          ? lessonsWithMeta.filter((l) => l.reportsCount > 0)
+          : lessonsWithMeta;
+
+      res.send(filtered);
+    });
+
+    app.get("/admin/lessons/stats", async (req, res) => {
+      const total = await lessonsCollection.countDocuments();
+      const publicLessons = await lessonsCollection.countDocuments({
+        privacy: "public",
+      });
+      const privateLessons = await lessonsCollection.countDocuments({
+        privacy: "private",
+      });
+      const flagged = await lessonsCollection.countDocuments({
+        isReported: true,
+      });
+
+      res.send({
+        total,
+        publicLessons,
+        privateLessons,
+        flagged,
+      });
+    });
+
+    app.delete("/admin/lessons/:id", async (req, res) => {
+      const id = req.params.id;
+
+      await lessonsCollection.deleteOne({ _id: new ObjectId(id) });
+
+      res.send({ success: true });
+    });
+
+    app.patch("/admin/lessons/:id/featured", async (req, res) => {
+      const { id } = req.params;
+      const { featured } = req.body;
+
+      const result = await lessonsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { featured } },
+      );
+
+      res.send(result);
+    });
+
+    app.patch("/admin/lessons/:id/reviewed", async (req, res) => {
+      const lessonId = req.params.id;
+
+      const result = await reportsCollection.deleteMany({ lessonId });
+
+      res.send({
+        modifiedCount: result.deletedCount,
+      });
+    });
+
+    // GET all reported lessons with report details
+    app.get("/admin/reported-lessons", async (req, res) => {
+      try {
+        const reports = await reportsCollection.find().toArray();
+
+        // group reports by lessonId
+        const reportMap = {};
+        reports.forEach((r) => {
+          if (!reportMap[r.lessonId]) {
+            reportMap[r.lessonId] = [];
+          }
+          reportMap[r.lessonId].push(r);
+        });
+
+        const lessonIds = Object.keys(reportMap).map((id) => new ObjectId(id));
+
+        const lessons = await lessonsCollection
+          .find({ _id: { $in: lessonIds } })
+          .toArray();
+
+        const reportedLessons = lessons.map((lesson) => ({
+          ...lesson,
+          reportCount: reportMap[lesson._id.toString()].length,
+          reports: reportMap[lesson._id.toString()],
+        }));
+
+        res.send(reportedLessons);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to load reported lessons" });
+      }
+    });
+
+    // Ignore reports (admin reviewed)
+    app.patch("/admin/reported-lessons/ignore/:lessonId", async (req, res) => {
+      const lessonId = req.params.lessonId;
+
+      await reportsCollection.deleteMany({ lessonId });
+
+      res.send({ success: true });
+    });
+
+    app.delete("/admin/reported-lessons/:lessonId", async (req, res) => {
+      const lessonId = req.params.lessonId;
+
+      await lessonsCollection.deleteOne({
+        _id: new ObjectId(lessonId),
+      });
+
+      await reportsCollection.deleteMany({ lessonId });
+
+      res.send({ success: true });
     });
 
     // ===== ===== Payments Related Api ===== =====//
