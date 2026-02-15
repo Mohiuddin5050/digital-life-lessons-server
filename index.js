@@ -9,7 +9,12 @@ const port = process.env.PORT || 3000;
 
 const admin = require("firebase-admin");
 
-const serviceAccount = require("./digital-life-lessions-firebase-adminsdk.json");
+// const serviceAccount = require("./digital-life-lessions-firebase-adminsdk.json");
+
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf8",
+);
+const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -17,7 +22,15 @@ admin.initializeApp({
 
 // middleware
 app.use(express.json());
-app.use(cors());
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "https://digital-life-lesson-beta.vercel.app", 'https://digital-life-lessions.web.app'
+    ],
+    credentials: true,
+  }),
+);
 
 const verifyFirebaseToken = async (req, res, next) => {
   const token = req.headers.authorization;
@@ -51,7 +64,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
     const db = client.db("digital_life_lessons");
     const userCollection = db.collection("users");
@@ -527,19 +540,6 @@ async function run() {
     });
     // ======= My lessons =========
 
-    // PATCH /lessons/:id
-    app.patch("/lessons/:id", async (req, res) => {
-      const id = req.params.id;
-      const updatedData = req.body;
-
-      const result = await lessonsCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: updatedData },
-      );
-
-      res.send(result);
-    });
-
     // PATCH /lessons/:id/visibility
     app.patch("/lessons/:id/visibility", async (req, res) => {
       const { id } = req.params;
@@ -781,7 +781,7 @@ async function run() {
     });
 
     // ======= Admin Related APIs ======= //
-    app.get("/admin/overview", verifyFirebaseToken, async (req, res) => {
+    app.get("/admin/overview", async (req, res) => {
       try {
         const totalUsers = await userCollection.countDocuments();
 
@@ -883,7 +883,7 @@ async function run() {
     });
 
     // GET /admin/users
-    app.get("/admin/users", async (req, res) => {
+    app.get("/admin/users", verifyFirebaseToken, async (req, res) => {
       try {
         const users = await userCollection
           .aggregate([
@@ -996,7 +996,7 @@ async function run() {
       });
     });
 
-    app.delete("/admin/lessons/:id", async (req, res) => {
+    app.delete("/admin/lessons/:id", verifyFirebaseToken, async (req, res) => {
       const id = req.params.id;
 
       await lessonsCollection.deleteOne({ _id: new ObjectId(id) });
@@ -1027,36 +1027,42 @@ async function run() {
     });
 
     // GET all reported lessons with report details
-    app.get("/admin/reported-lessons", async (req, res) => {
-      try {
-        const reports = await reportsCollection.find().toArray();
+    app.get(
+      "/admin/reported-lessons",
+      
+      async (req, res) => {
+        try {
+          const reports = await reportsCollection.find().toArray();
 
-        // group reports by lessonId
-        const reportMap = {};
-        reports.forEach((r) => {
-          if (!reportMap[r.lessonId]) {
-            reportMap[r.lessonId] = [];
-          }
-          reportMap[r.lessonId].push(r);
-        });
+          // group reports by lessonId
+          const reportMap = {};
+          reports.forEach((r) => {
+            if (!reportMap[r.lessonId]) {
+              reportMap[r.lessonId] = [];
+            }
+            reportMap[r.lessonId].push(r);
+          });
 
-        const lessonIds = Object.keys(reportMap).map((id) => new ObjectId(id));
+          const lessonIds = Object.keys(reportMap).map(
+            (id) => new ObjectId(id),
+          );
 
-        const lessons = await lessonsCollection
-          .find({ _id: { $in: lessonIds } })
-          .toArray();
+          const lessons = await lessonsCollection
+            .find({ _id: { $in: lessonIds } })
+            .toArray();
 
-        const reportedLessons = lessons.map((lesson) => ({
-          ...lesson,
-          reportCount: reportMap[lesson._id.toString()].length,
-          reports: reportMap[lesson._id.toString()],
-        }));
+          const reportedLessons = lessons.map((lesson) => ({
+            ...lesson,
+            reportCount: reportMap[lesson._id.toString()].length,
+            reports: reportMap[lesson._id.toString()],
+          }));
 
-        res.send(reportedLessons);
-      } catch (err) {
-        res.status(500).send({ message: "Failed to load reported lessons" });
-      }
-    });
+          res.send(reportedLessons);
+        } catch (err) {
+          res.status(500).send({ message: "Failed to load reported lessons" });
+        }
+      },
+    );
 
     // Ignore reports (admin reviewed)
     app.patch("/admin/reported-lessons/ignore/:lessonId", async (req, res) => {
@@ -1067,17 +1073,21 @@ async function run() {
       res.send({ success: true });
     });
 
-    app.delete("/admin/reported-lessons/:lessonId", async (req, res) => {
-      const lessonId = req.params.lessonId;
+    app.delete(
+      "/admin/reported-lessons/:lessonId",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const lessonId = req.params.lessonId;
 
-      await lessonsCollection.deleteOne({
-        _id: new ObjectId(lessonId),
-      });
+        await lessonsCollection.deleteOne({
+          _id: new ObjectId(lessonId),
+        });
 
-      await reportsCollection.deleteMany({ lessonId });
+        await reportsCollection.deleteMany({ lessonId });
 
-      res.send({ success: true });
-    });
+        res.send({ success: true });
+      },
+    );
 
     // ===== ===== Payments Related Api ===== =====//
 
@@ -1145,10 +1155,10 @@ async function run() {
     });
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!",
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!",
+    // );
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
