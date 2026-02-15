@@ -7,9 +7,35 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
 const port = process.env.PORT || 3000;
 
+const admin = require("firebase-admin");
+
+const serviceAccount = require("./digital-life-lessions-firebase-adminsdk.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
 // middleware
 app.use(express.json());
 app.use(cors());
+
+const verifyFirebaseToken = async (req, res, next) => {
+  const token = req.headers.authorization;
+
+  if (!token) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+
+  try {
+    const idToken = token.split(" ")[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    req.decoded_email = decoded.email;
+  } catch (error) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+
+  next();
+};
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.uji33wc.mongodb.net/?appName=Cluster0`;
 
@@ -78,14 +104,14 @@ async function run() {
     app.patch("/users", async (req, res) => {
       const email = req.query.email;
 
-      const { displayName, photoUrl } = req.body;
+      const { displayName, photoURL } = req.body;
 
       const query = { email };
 
       const updatedDoc = {
         $set: {
           displayName,
-          photoUrl,
+          photoURL,
         },
       };
 
@@ -106,7 +132,7 @@ async function run() {
 
         res.send({
           displayName: user.displayName,
-          photoUrl: user.photoUrl,
+          photoURL: user.photoURL,
           email: user.email,
           totalLessons,
         });
@@ -324,7 +350,7 @@ async function run() {
         // 👉 Attach author object
         lesson.author = {
           displayName: author?.displayName || "Anonymous",
-          photoUrl: author?.photoUrl || null,
+          photoURL: author?.photoURL || null,
           email: author?.email,
           totalLessons,
         };
@@ -352,7 +378,7 @@ async function run() {
     });
 
     // GET lesson by ID (for update)
-    app.get("/lessons/edit/:id", async (req, res) => {
+    app.get("/lessons/edit/:id", verifyFirebaseToken, async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -541,7 +567,7 @@ async function run() {
     });
 
     // DELETE /lessons/:id
-    app.delete("/lessons/:id", async (req, res) => {
+    app.delete("/lessons/:id", verifyFirebaseToken, async (req, res) => {
       const id = req.params.id;
 
       await lessonsCollection.deleteOne({ _id: new ObjectId(id) });
@@ -595,7 +621,7 @@ async function run() {
     });
 
     // DELETE /favorites/:lessonId
-    app.delete("/favorites/remove", async (req, res) => {
+    app.delete("/favorites/remove", verifyFirebaseToken, async (req, res) => {
       try {
         const { lessonId, email } = req.query;
 
@@ -671,7 +697,7 @@ async function run() {
                 _id: 1,
                 name: "$displayName",
                 email: 1,
-                photoURL: "$photoUrl",
+                photoURL: "$photoURL",
                 totalLessons: 1,
               },
             },
@@ -755,7 +781,7 @@ async function run() {
     });
 
     // ======= Admin Related APIs ======= //
-    app.get("/admin/overview", async (req, res) => {
+    app.get("/admin/overview", verifyFirebaseToken, async (req, res) => {
       try {
         const totalUsers = await userCollection.countDocuments();
 
