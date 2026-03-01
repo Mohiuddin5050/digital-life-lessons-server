@@ -26,25 +26,67 @@ app.use(
   cors({
     origin: [
       "http://localhost:5173",
-      "https://digital-life-lesson-beta.vercel.app", 'https://digital-life-lessions.web.app'
+      "https://digital-life-lesson-beta.vercel.app",
+      "https://digital-life-lessions.web.app",
     ],
     credentials: true,
   }),
 );
 
-const verifyFirebaseToken = async (req, res, next) => {
-  const token = req.headers.authorization;
+// const verifyFirebaseToken = async (req, res, next) => {
+//   const token = req.headers.authorization;
 
-  if (!token) {
+//   if (!token) {
+//     return res.status(401).send({ message: "Unauthorized access" });
+//   }
+
+//   try {
+//     const idToken = token.split(" ")[1];
+//     const decoded = await admin.auth().verifyIdToken(idToken);
+//     req.decoded_email = decoded.email;
+//   } catch (error) {
+//     return res.status(401).send({ message: "Unauthorized access" });
+//   }
+
+//   next();
+// };
+
+const verifyFirebaseToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).send({ message: "Unauthorized access" });
   }
 
   try {
-    const idToken = token.split(" ")[1];
-    const decoded = await admin.auth().verifyIdToken(idToken);
-    req.decoded_email = decoded.email;
+    const idToken = authHeader.split(" ")[1];
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+
+    req.user = {
+      email: decodedToken.email,
+      uid: decodedToken.uid,
+    };
+
+    next();
   } catch (error) {
-    return res.status(401).send({ message: "Unauthorized access" });
+    console.error("Token verify error:", error.message);
+    return res.status(401).send({
+      message: "Token expired or invalid",
+    });
+  }
+};
+
+const verifyAdmin = async (req, res, next) => {
+  const email = req.user?.email;
+
+  if (!email) {
+    return res.status(401).send({ message: "Unauthorized" });
+  }
+
+  const user = await userCollection.findOne({ email });
+
+  if (!user || user.role !== "admin") {
+    return res.status(403).send({ message: "Forbidden: Admin only" });
   }
 
   next();
@@ -213,7 +255,7 @@ async function run() {
     });
 
     //Post API Create Lessons.
-    app.post("/lessons", async (req, res) => {
+    app.post("/lessons", verifyFirebaseToken, async (req, res) => {
       const lesson = req.body;
       lesson.createdAt = new Date();
       lesson.likes = [];
@@ -239,7 +281,7 @@ async function run() {
       }
     });
 
-    app.get("/dashboard/summary", async (req, res) => {
+    app.get("/dashboard/summary", verifyFirebaseToken, async (req, res) => {
       try {
         const { email } = req.query;
 
@@ -263,10 +305,6 @@ async function run() {
           .sort({ createdAt: -1 })
           .limit(3)
           .toArray();
-
-        // Weekly analytics (last 7 days)
-        // const sevenDaysAgo = new Date();
-        // sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
         const weeklyLessons = await lessonsCollection.countDocuments({
           createdBy: email,
@@ -411,7 +449,7 @@ async function run() {
     });
 
     // UPDATE lesson
-    app.patch("/lessons/:id", async (req, res) => {
+    app.patch("/lessons/:id", verifyFirebaseToken, async (req, res) => {
       try {
         const { id } = req.params;
         const updatedData = req.body;
@@ -567,13 +605,18 @@ async function run() {
     });
 
     // DELETE /lessons/:id
-    app.delete("/lessons/:id", verifyFirebaseToken, async (req, res) => {
-      const id = req.params.id;
+    app.delete(
+      "/lessons/:id",
+      verifyFirebaseToken,
+      verifyFirebaseToken,
+      async (req, res) => {
+        const id = req.params.id;
 
-      await lessonsCollection.deleteOne({ _id: new ObjectId(id) });
+        await lessonsCollection.deleteOne({ _id: new ObjectId(id) });
 
-      res.send({ success: true });
-    });
+        res.send({ success: true });
+      },
+    );
 
     // ===============
 
@@ -781,142 +824,157 @@ async function run() {
     });
 
     // ======= Admin Related APIs ======= //
-    app.get("/admin/overview", async (req, res) => {
-      try {
-        const totalUsers = await userCollection.countDocuments();
+    app.get(
+      "/admin/overview",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const totalUsers = await userCollection.countDocuments();
 
-        const totalPublicLessons = await lessonsCollection.countDocuments({
-          privacy: "public",
-        });
+          const totalPublicLessons = await lessonsCollection.countDocuments({
+            privacy: "public",
+          });
 
-        const totalReportedLessons = await reportsCollection.countDocuments();
+          const totalReportedLessons = await reportsCollection.countDocuments();
 
-        // Today's lessons
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
+          // Today's lessons
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
 
-        const todaysLessons = await lessonsCollection.countDocuments({
-          createdAt: { $gte: today },
-        });
+          const todaysLessons = await lessonsCollection.countDocuments({
+            createdAt: { $gte: today },
+          });
 
-        res.send({
-          totalUsers,
-          totalPublicLessons,
-          totalReportedLessons,
-          todaysLessons,
-        });
-      } catch (err) {
-        res.status(500).send({ message: "Admin overview failed" });
-      }
-    });
+          res.send({
+            totalUsers,
+            totalPublicLessons,
+            totalReportedLessons,
+            todaysLessons,
+          });
+        } catch (err) {
+          res.status(500).send({ message: "Admin overview failed" });
+        }
+      },
+    );
 
-    app.get("/admin/analytics", async (req, res) => {
-      try {
-        // ===== USERS GROWTH =====
-        const usersGrowth = await userCollection
-          .aggregate([
-            {
-              $group: {
-                _id: {
-                  $dateToString: {
-                    format: "%Y-%m-%d",
-                    date: "$createdAt",
+    app.get(
+      "/admin/analytics",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          // ===== USERS GROWTH =====
+          const usersGrowth = await userCollection
+            .aggregate([
+              {
+                $group: {
+                  _id: {
+                    $dateToString: {
+                      format: "%Y-%m-%d",
+                      date: "$createdAt",
+                    },
                   },
+                  users: { $sum: 1 },
                 },
-                users: { $sum: 1 },
               },
-            },
-            { $sort: { _id: 1 } },
-          ])
-          .toArray();
+              { $sort: { _id: 1 } },
+            ])
+            .toArray();
 
-        // ===== LESSONS GROWTH =====
-        const lessonsGrowth = await lessonsCollection
-          .aggregate([
-            {
-              $group: {
-                _id: {
-                  $dateToString: {
-                    format: "%Y-%m-%d",
-                    date: "$createdAt",
+          // ===== LESSONS GROWTH =====
+          const lessonsGrowth = await lessonsCollection
+            .aggregate([
+              {
+                $group: {
+                  _id: {
+                    $dateToString: {
+                      format: "%Y-%m-%d",
+                      date: "$createdAt",
+                    },
                   },
+                  lessons: { $sum: 1 },
                 },
-                lessons: { $sum: 1 },
               },
-            },
-            { $sort: { _id: 1 } },
-          ])
-          .toArray();
+              { $sort: { _id: 1 } },
+            ])
+            .toArray();
 
-        // ===== MERGE BOTH DATA =====
-        const growthMap = {};
+          // ===== MERGE BOTH DATA =====
+          const growthMap = {};
 
-        usersGrowth.forEach((item) => {
-          growthMap[item._id] = {
-            date: item._id,
-            users: item.users,
-            lessons: 0,
-          };
-        });
-
-        lessonsGrowth.forEach((item) => {
-          if (!growthMap[item._id]) {
+          usersGrowth.forEach((item) => {
             growthMap[item._id] = {
               date: item._id,
-              users: 0,
-              lessons: item.lessons,
+              users: item.users,
+              lessons: 0,
             };
-          } else {
-            growthMap[item._id].lessons = item.lessons;
-          }
-        });
+          });
 
-        const result = Object.values(growthMap).sort(
-          (a, b) => new Date(a.date) - new Date(b.date),
-        );
+          lessonsGrowth.forEach((item) => {
+            if (!growthMap[item._id]) {
+              growthMap[item._id] = {
+                date: item._id,
+                users: 0,
+                lessons: item.lessons,
+              };
+            } else {
+              growthMap[item._id].lessons = item.lessons;
+            }
+          });
 
-        res.send(result);
-      } catch (error) {
-        console.error("Admin growth analytics error:", error);
-        res.status(500).send({ message: "Failed to load growth analytics" });
-      }
-    });
+          const result = Object.values(growthMap).sort(
+            (a, b) => new Date(a.date) - new Date(b.date),
+          );
+
+          res.send(result);
+        } catch (error) {
+          console.error("Admin growth analytics error:", error);
+          res.status(500).send({ message: "Failed to load growth analytics" });
+        }
+      },
+    );
 
     // GET /admin/users
-    app.get("/admin/users", verifyFirebaseToken, async (req, res) => {
-      try {
-        const users = await userCollection
-          .aggregate([
-            {
-              $lookup: {
-                from: "lessons",
-                localField: "email",
-                foreignField: "createdBy",
-                as: "lessons",
+    app.get(
+      "/admin/users",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const users = await userCollection
+            .aggregate([
+              {
+                $lookup: {
+                  from: "lessons",
+                  localField: "email",
+                  foreignField: "createdBy",
+                  as: "lessons",
+                },
               },
-            },
-            {
-              $addFields: {
-                totalLessons: { $size: "$lessons" },
+              {
+                $addFields: {
+                  totalLessons: { $size: "$lessons" },
+                },
               },
-            },
-            {
-              $project: {
-                displayName: 1,
-                email: 1,
-                role: 1,
-                isPremium: 1,
-                totalLessons: 1,
+              {
+                $project: {
+                  displayName: 1,
+                  email: 1,
+                  role: 1,
+                  isPremium: 1,
+                  totalLessons: 1,
+                },
               },
-            },
-          ])
-          .toArray();
+            ])
+            .toArray();
 
-        res.send(users);
-      } catch (error) {
-        res.status(500).send({ message: "Failed to load users" });
-      }
-    });
+          res.send(users);
+        } catch (error) {
+          res.status(500).send({ message: "Failed to load users" });
+        }
+      },
+    );
 
     // PATCH /admin/users/role
     app.patch("/admin/users/role", async (req, res) => {
@@ -941,40 +999,45 @@ async function run() {
     });
 
     // GET /admin/lessons
-    app.get("/admin/lessons", async (req, res) => {
-      const { category, privacy, flagged } = req.query;
+    app.get(
+      "/admin/lessons",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        const { category, privacy, flagged } = req.query;
 
-      const query = {};
-      if (category) query.category = category;
-      if (privacy) query.privacy = privacy;
+        const query = {};
+        if (category) query.category = category;
+        if (privacy) query.privacy = privacy;
 
-      const lessons = await lessonsCollection.find(query).toArray();
+        const lessons = await lessonsCollection.find(query).toArray();
 
-      const lessonIds = lessons.map((l) => l._id.toString());
+        const lessonIds = lessons.map((l) => l._id.toString());
 
-      const reports = await reportsCollection
-        .find({ lessonId: { $in: lessonIds } })
-        .toArray();
+        const reports = await reportsCollection
+          .find({ lessonId: { $in: lessonIds } })
+          .toArray();
 
-      const lessonsWithMeta = lessons.map((lesson) => {
-        const lessonReports = reports.filter(
-          (r) => r.lessonId === lesson._id.toString(),
-        );
+        const lessonsWithMeta = lessons.map((lesson) => {
+          const lessonReports = reports.filter(
+            (r) => r.lessonId === lesson._id.toString(),
+          );
 
-        return {
-          ...lesson,
-          reportsCount: lessonReports.length,
-          reviewed: lessonReports.length === 0,
-        };
-      });
+          return {
+            ...lesson,
+            reportsCount: lessonReports.length,
+            reviewed: lessonReports.length === 0,
+          };
+        });
 
-      const filtered =
-        flagged === "flagged"
-          ? lessonsWithMeta.filter((l) => l.reportsCount > 0)
-          : lessonsWithMeta;
+        const filtered =
+          flagged === "flagged"
+            ? lessonsWithMeta.filter((l) => l.reportsCount > 0)
+            : lessonsWithMeta;
 
-      res.send(filtered);
-    });
+        res.send(filtered);
+      },
+    );
 
     app.get("/admin/lessons/stats", async (req, res) => {
       const total = await lessonsCollection.countDocuments();
@@ -996,13 +1059,18 @@ async function run() {
       });
     });
 
-    app.delete("/admin/lessons/:id", verifyFirebaseToken, async (req, res) => {
-      const id = req.params.id;
+    app.delete(
+      "/admin/lessons/:id",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
 
-      await lessonsCollection.deleteOne({ _id: new ObjectId(id) });
+        await lessonsCollection.deleteOne({ _id: new ObjectId(id) });
 
-      res.send({ success: true });
-    });
+        res.send({ success: true });
+      },
+    );
 
     app.patch("/admin/lessons/:id/featured", async (req, res) => {
       const { id } = req.params;
@@ -1029,7 +1097,9 @@ async function run() {
     // GET all reported lessons with report details
     app.get(
       "/admin/reported-lessons",
-      
+      verifyFirebaseToken,
+      verifyAdmin,
+
       async (req, res) => {
         try {
           const reports = await reportsCollection.find().toArray();
